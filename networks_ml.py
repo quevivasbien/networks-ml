@@ -1,11 +1,11 @@
 import torch
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import typing
 
-# from numba import jit
+from numba import jit
 from torch import nn
-# from scipy.optimize import minimize
 from multiprocessing import Pool, cpu_count
 
 rng = np.random.default_rng()
@@ -18,6 +18,43 @@ def get_dict(s: list) -> dict:
     return out
 
 
+@jit
+def get_min_distances(graph: np.ndarray) -> np.ndarray:
+    """Figures out minimum distance between all pairs in a network
+    graph must be ndarray of type int
+    
+    Algorithm description:
+    Initialize distance matrix to all zeros (meaning no connections found yet)
+    For each network member, record direct neighbors as 1 in distance matrix
+    For n = 1, 2, 3, ...
+        For each network member, look at direct neighbors of those marked as n in previous step:
+            If those neighbors are already != 0, do nothing
+            Else record as n+1
+        If distance matrix is all filled in, stop
+    """
+    size = graph.shape[0]
+    neighbors = [[j for j in range(size) if graph[i, j]] for i in range(size)]
+    distances = graph.copy()
+    n = 1
+    keep_going = True
+    while keep_going:
+        keep_going = False
+        for i in range(size):
+            for j in range(size):
+                if i == j or distances[i, j] != n:
+                    continue
+                keep_going = True
+                for k in neighbors[j]:
+                    if i != k and distances[i, k] == 0:
+                        distances[i, k] = n + 1
+        n += 1
+    for i in range(size):
+        for j in range(size):
+            if i != j and distances[i, j] == 0:
+                distances[i, j] = -1
+    return distances
+
+
 class Network:
 
     def __init__(self, graph: np.ndarray, value_mean: float = 0.0, value_sd: float = 1.0, signal_life: int = 5, signal_error_sd: float = 0.1):
@@ -28,6 +65,7 @@ class Network:
         self.signal_life = signal_life
         self.signal_error_sd = signal_error_sd
         self._set_signals()
+        self._network_distances = None
     
     def _set_signals(self):
         signals = [[] for _ in range(self.graph_size)]
@@ -53,11 +91,30 @@ class Network:
         # format as dict
         self.signals = [get_dict(s) for s in signals]
 
+    def get_network_distances(self):
+        if self._network_distances is None:
+            self._network_distances = get_min_distances(self.graph)
+        return self._network_distances
+    
+    def closeness_centrality(self):
+        if -1 in self.get_network_distances():
+            print('Warning: attempted to calculate closeness centrality on unconnected graph')
+            return np.zeros(self.graph_size)
+        else:
+            return self.get_network_distances().sum(axis=0) ** -1
+    
+    def get_eigenvector_centrality(self):
+        eigvals, eigvecs = np.linalg.eig(self.graph + np.eye(self.graph_size, dtype=int))
+        return eigvecs[:, np.abs(eigvals).argmax()]
+
+
 
 def gen_random_graph(size: int, p: float = 0.5) -> np.ndarray:
-    """Creates a symmetric matrix of size (size x size) where proba of [off-diagonal element == True] is p"""
+    """Creates a symmetric matrix of size (size x size) where proba of [off-diagonal element == 1] is p
+    Diagonal elements are set to 0 
+    """
     random_mat = rng.random((size, size))
-    return (random_mat + random_mat.T < 2 * p).astype(bool) * ~np.eye(size, dtype=bool)
+    return (random_mat + random_mat.T < 2 * p).astype(int) * (1 - np.eye(size, dtype=int))
 
 
 # now set up neural nets and training algorithm
@@ -70,7 +127,20 @@ def init_weights(m):
 
 class MLModel(nn.Module):
 
-    def __init__(self, graph_size: int, max_signals: int, n_hidden: int = 4, hidden_size: int = 50):
+    def __init__(
+        self,
+        # graph params
+        graph_size: int,
+        connection_proba: float = 0.5,
+        value_mean: float = 0.0,
+        value_sd: float = 1.0,
+        signal_life: int = 5,
+        signal_error_sd: float = 0.1,
+        # model params
+        max_signals: int = 2,
+        n_hidden: int = 4,
+        hidden_size: int = 50
+    ):
         super().__init__()
         
         self.graph_size = graph_size
@@ -92,6 +162,12 @@ class MLModel(nn.Module):
         self.last = nn.Linear(hidden_size, graph_size)
 
         self.apply(init_weights)
+
+        self.connection_proba = connection_proba
+        self.value_mean = value_mean
+        self.value_sd = value_sd
+        self.signal_life = signal_life
+        self.signal_error_sd = signal_error_sd
     
     def get_features(self, net: Network) -> torch.Tensor:
         assert(net.graph_size == self.graph_size)
@@ -120,10 +196,20 @@ class MLModel(nn.Module):
             x = x + torch.relu(h(x))
         return self.last(x)
 
+    def _get_nets_features_targets(
+        self, n: int, threads: int
+    ) -> typing.Tuple[list, list, list]:
+        output_list = []
+        while len(output_list) < n:
+            pool_size = min(threads, n - len(output_list))
+            with Pool(pool_size) as pool:
+                output_list += pool.map(
+                    get_nets_features_targets, [self] * pool_size
+                )
+        return tuple(zip(*output_list))
+
     def train(
         self,
-        connection_proba: float = 0.5,
-        value_mean: float = 0.0, value_sd: float = 1.0, signal_life: int = 5, signal_error_sd: float = 0.1,
         epochs: int = 100, lr: float = 1e-3,
         epoch_size: int = 20, threads: int = min(20, cpu_count())
     ) -> list:
@@ -131,63 +217,67 @@ class MLModel(nn.Module):
         loss_fn = nn.MSELoss()
         loss_history = []
         for i in range(epochs):
-            feature_target_list = []
-            while len(feature_target_list) < epoch_size:
-                pool_size = min(threads, epoch_size - len(feature_target_list))
-                with Pool(pool_size) as pool:
-                    feature_target_list += pool.map(
-                        _get_features,
-                        [(self, connection_proba, value_mean, value_sd, signal_life, signal_error_sd)] * pool_size
-                    )
+            _, features, targets = self._get_nets_features_targets(epoch_size, threads)
                     
-            features = torch.concat(tuple(f[0] for f in feature_target_list))
-            targets = torch.concat(tuple(f[1] for f in feature_target_list))
+            features = torch.concat(features)
+            targets = torch.concat(targets)
             optimizer.zero_grad()
             loss = loss_fn(self.forward(features), targets)
             loss_history.append(loss.item())
             loss.backward()
             optimizer.step()
-            if ((i+1) % (epochs // 10) == 0):
+            if ((epochs >= 10 and (i+1) % (epochs // 10) == 0) or (i + 1 == epochs)):
                 print(f'Epoch {i+1} of {epochs}: Loss = {loss:.3e}')
         return loss_history
+    
+    def _eval_single(self, net: Network, features: torch.Tensor, targets: torch.Tensor) -> pd.DataFrame:
+        with torch.no_grad():
+            scores = ((self.forward(features) - targets)**2).numpy()
+        distances = net.get_network_distances()
+        centralities = net.get_eigenvector_centrality()
+        return pd.DataFrame(
+            np.concatenate(
+                (
+                    np.stack((np.arange(net.graph_size, dtype=int), centralities), axis=1),
+                    distances,
+                    scores
+                ),
+                axis=1
+            )
+        )
+    
+    def eval(self, n: int, threads: int = min(20, cpu_count())) -> pd.DataFrame:
+        nets, features, targets = self._get_nets_features_targets(n, threads)
+        df = pd.concat((self._eval_single(n, f, t) for n, f, t in zip(nets, features, targets)))
+        df.columns = (
+            ['idx', 'centrality']
+            + [f'd{i}' for i in range(self.graph_size)]
+            + [f'score{i}' for i in range(self.graph_size)]
+        )
+        df['net'] = sum(([f'{i}'] * self.graph_size for i in range(n)), [])
+        df.set_index(['net', 'idx'], drop = True, inplace = True)
+        return df
 
 
-def get_features(
-    model: MLModel,
-    connection_proba: float,
-    value_mean: float, value_sd: float, signal_life: int, signal_error_sd: float
-) -> typing.Tuple[torch.Tensor, torch.Tensor]:
-    graph = gen_random_graph(model.graph_size, connection_proba)
-    net = Network(graph, value_mean, value_sd, signal_life, signal_error_sd)
+def get_nets_features_targets(
+    model: MLModel
+) -> typing.Tuple[Network, torch.Tensor, torch.Tensor]:
+    graph = gen_random_graph(model.graph_size, model.connection_proba)
+    net = Network(graph, model.value_mean, model.value_sd, model.signal_life, model.signal_error_sd)
     features = model.get_features(net)
     targets = torch.tile(torch.from_numpy(net.values), (model.graph_size, 1)).float()
-    return features, targets
-
-def _get_features(
-    args: typing.Tuple[MLModel, float, float, float, int, float]
-) -> typing.Tuple[torch.Tensor, torch.Tensor]:
-    return get_features(*args)
+    return net, features, targets
 
 
 def main():
-    """Currently just a test to run to make sure things are working well"""
-    model = MLModel(12, 2)
+    model = MLModel(20, connection_proba=0.2, signal_life=6, max_signals=3, hidden_size=100)
 
-    loss_history = model.train(connection_proba=0.2, lr=1e-2, epochs=100)
+    loss_history = model.train(lr=1e-3, epochs=200)
 
     plt.plot(loss_history, linestyle='', marker='.', alpha=0.6)
     plt.show()
 
-    graph = gen_random_graph(model.graph_size, 0.5)
-    net = Network(graph)
-
-    with torch.no_grad():
-        features = model.get_features(net)
-        preds = model.forward(features)
-
-    print(graph)
-    print(net.values)
-    print(preds.numpy())
+    model.eval(200).to_csv('test.csv')
 
 
 if __name__ == '__main__':

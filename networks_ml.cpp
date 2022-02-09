@@ -3,10 +3,11 @@
 #include <memory>
 #include <vector>
 #include <string>
+#include <tuple>
 #include <thread>
+#include <mutex>
 #include <random>
 #include <assert.h>
-
 #include <iostream>
 
 
@@ -34,8 +35,8 @@ public:
         values_[i * size_ + j] = new_val;
     }
 
-    std::vector<T> values() const {
-        return values;
+    const std::vector<T>& values() const {
+        return values_;
     }
 
     void print() const {
@@ -59,11 +60,14 @@ private:
 
 Matrix<bool> gen_random_graph(std::size_t size, double p) {
     assert(0.0 <= p <= 1.0);
-    std::vector<bool> values;
-    values.reserve(size * size);
+    std::vector<bool> values(size * size);
     std::uniform_real_distribution<double> dist(0, 1);
-    for (std::size_t i = 0; i < size * (size - 1) / 2; i++) {
-        values.push_back(dist(rng));
+    for (std::size_t i = 0; i < size - 1; i++) {
+        for (std::size_t j = i + 1; j < size; j++) {
+            bool value = dist(rng) <= p;
+            values[i * size + j] = value;
+            values[j * size + i] = value;
+        }
     }
     return Matrix<bool>(values, size);
 }
@@ -94,12 +98,12 @@ public:
     NetMember(
         std::size_t graph_size, std::size_t my_idx, double my_value
     ) : graph_size(graph_size), my_idx(my_idx), to_share({Signal(my_idx, my_idx, my_value)}) {
-        signals.resize(graph_size);
+        signals_.resize(graph_size);
     }
 
     void receive_signal(Signal signal) {
         if (is_new_source_and_origin(signal)) {
-            signals[signal.source].push_back(signal);
+            signals_[signal.source].push_back(signal);
             recently_received.push_back(signal);
         }
     }
@@ -117,9 +121,13 @@ public:
         return to_share;
     }
 
+    const std::vector<std::vector<Signal>>& signals() const {
+        return signals_;
+    }
+
     void print() const {
         std::cout << "Signals received by member " << my_idx << ":\n";
-        for (const auto& signal_set : signals) {
+        for (const auto& signal_set : signals_) {
             for (const Signal& signal : signal_set) {
                 std::cout << "Source: " << signal.source
                     << ", Sender: " << signal.sender
@@ -135,7 +143,7 @@ private:
             // This signal is about me, so I don't need it
             return false;
         }
-        for (const Signal& my_signal : signals[signal.source]) {
+        for (const Signal& my_signal : signals_[signal.source]) {
             if (my_signal.sender == signal.sender) {
                 // I already have a signal about this source from this sender
                 return false;
@@ -147,7 +155,7 @@ private:
     std::size_t graph_size;
     std::size_t my_idx;
 
-    std::vector<std::vector<Signal>> signals;
+    std::vector<std::vector<Signal>> signals_;
     std::vector<Signal> to_share;
     std::vector<Signal> recently_received;
 };
@@ -278,19 +286,30 @@ void xavier_init(torch::nn::Module& module) {
 }
 
 
+template <typename T, typename U>
+std::vector<T> as_type(std::vector<U> vec) {
+    std::vector<T> out;
+    out.reserve(vec.size());
+    for (const auto& v : vec) {
+        out.push_back(static_cast<T>(v));
+    }
+    return out;
+}
+
+
 struct MLModel : torch::nn::Module {
     MLModel(
         // graph params
-        std::size_t graph_size,
+        long int graph_size,
         double connection_proba = 0.5,
         double value_mean = 0.0,
         double value_sd = 1.0,
-        std::size_t signal_life = 5,
+        long int signal_life = 5,
         double signal_error_sd = 0.1,
         // model params
-        std::size_t max_signals = 4,
-        std::size_t n_hidden = 4,
-        std::size_t hidden_size = 50
+        long int max_signals = 4,
+        long int n_hidden = 4,
+        long int hidden_size = 50
     ) : graph_size(graph_size),
         max_signals(max_signals),
         connection_proba(connection_proba),
@@ -305,14 +324,14 @@ struct MLModel : torch::nn::Module {
         // for each graph member * for each of max_signals:
         // graph_size features to indicate signal sender id
         // 1 for signal value
-        n_other_features = graph_size + max_signals + (graph_size + 1);
+        n_other_features = graph_size * max_signals * (graph_size + 1);
         n_features = graph_size * (graph_size + 1) + n_other_features;
 
         first = register_module(
             "first",
             torch::nn::Linear(n_features, hidden_size)
         );
-        for (std::size_t i = 0; i < n_hidden; i++) {
+        for (long int i = 0; i < n_hidden; i++) {
             hidden.push_back(
                 register_module(
                     "hidden_" + std::to_string(i),
@@ -331,31 +350,29 @@ struct MLModel : torch::nn::Module {
     torch::Tensor get_features(const Network& net) {
         assert(net.graph().size() == graph_size);
         auto graph_features = torch::tile(
-            torch::from_blob(
-                net.graph().values(), torch::dtype(torch::kFloat32)
-            ),
-            {graph_size, n_other_features}
+            torch::tensor(as_type<float, bool>(net.graph().values())),
+            {graph_size, 1}
         );
         auto id_features = torch::eye(graph_size);
         auto other_features = torch::zeros({graph_size, n_other_features});
         // iterate through network members
         auto net_members = net.net_members();
-        for (std::size_t i = 0; i < net_members.size(); i++) {
+        for (long int i = 0; i < net_members.size(); i++) {
             // iterate through signal sources
-            auto signals_set = net_members[i].signals;
-            for (std::size_t j = 0; j < signals_set.size(); j++) {
+            auto signals_set = net_members[i].signals();
+            for (long int j = 0; j < signals_set.size(); j++) {
                 const auto& signals = signals_set[j];
-                std::size_t start_idx = max_signals * (graph_size + 1) * j;
+                long int start_idx = max_signals * (graph_size + 1) * j;
                 // iterate through signal senders
                 for (
-                    std::size_t k = 0;
+                    long int k = 0;
                     k < signals.size() && k < max_signals;
                     k++
                 ) {
                     const Signal& signal = signals[k];
-                    std::size_t offset = start_idx + (graph_size + 1) * k;
-                    other_features.index({i, offset + signal.sender}) = 1.0;
-                    other_features.index({i, offset + graph_size}) = signal.value
+                    long int offset = start_idx + (graph_size + 1) * k;
+                    other_features.index({i, offset + static_cast<long int>(signal.sender)}) = 1.0;
+                    other_features.index({i, offset + graph_size}) = signal.value;
                 }
             }
         }
@@ -370,71 +387,104 @@ struct MLModel : torch::nn::Module {
         return last->forward(x);
     }
 
+    void get_nets_features_targets_helper(
+        std::vector<Network>* nets,
+        std::vector<torch::Tensor>* features,
+        std::vector<torch::Tensor>* targets
+    ) {
+        auto graph = gen_random_graph(graph_size, connection_proba);
+        Network new_net(graph, value_mean, value_sd, signal_life, signal_error_sd);
+        auto new_features = get_features(new_net);
+        auto new_targets = torch::tile(
+            torch::tensor(new_net.values()),
+            {graph_size, 1}
+        );
+        {
+            std::lock_guard<std::mutex> lock(myMutex);
+            nets->push_back(new_net);
+            features->push_back(new_features);
+            targets->push_back(new_targets);
+        }
+    }
+
+    std::tuple<
+        std::vector<Network>, torch::Tensor, torch::Tensor
+    > get_nets_features_targets(long int n, long int threads) {
+        std::vector<Network> networks;
+        networks.reserve(n);
+        std::vector<torch::Tensor> features;
+        features.reserve(n);
+        std::vector<torch::Tensor> targets;
+        targets.reserve(n);
+        while (networks.size() < n) {
+            long int pool_size = (threads < n) ? threads : n;
+            std::vector<std::thread> threads;
+            threads.reserve(pool_size);
+            for (long int i = 0; i < pool_size; i++) {
+                threads.push_back(
+                    std::thread(
+                        &MLModel::get_nets_features_targets_helper,
+                        this,
+                        &networks,
+                        &features,
+                        &targets
+                    )
+                );
+            }
+            for (long int i = 0; i < pool_size; i++) {
+                threads[i].join();
+            }
+        }
+        return std::make_tuple(
+            networks,
+            torch::concat(features),
+            torch::concat(targets)
+        );
+    }
+
     std::vector<double> train(
-        std::size_t epochs = 100,
-        double lr = 0.001
-        // std::size_t epoch_size = 20,
-        // std::size_t threads = 20
+        long int epochs = 100,
+        double lr = 0.001,
+        long int epoch_size = 20,
+        long int threads = 20
     ) {
         auto optimizer = torch::optim::Adam(parameters(), lr);
-        loss_fn = torch::nn::MSELoss();
+        auto loss_fn = torch::nn::MSELoss();
         std::vector<double> loss_history;
         loss_history.reserve(epochs);
-        for (std::size_t i = 0; i < epochs; i++) {
-            auto graph = gen_random_graph(graph_size, connection_proba);
-            Network net(graph, value_mean, value_sd, signal_life, signal_error_sd);
-            auto features = get_features(net);
-            auto targets = torch::tile(
-                torch::from_blob(net.values),
-                {graph_size, 1}
-            );
+        for (long int i = 0; i < epochs; i++) {
+            auto [_, features, targets] = get_nets_features_targets(epoch_size, threads);
             optimizer.zero_grad();
             auto loss = loss_fn(forward(features), targets);
             loss_history.push_back(loss.item<double>());
             loss.backward();
             optimizer.step();
-            if ((i + 1) % epochs == 0 || i + 1 == epochs) {
+            if ((i + 1) % 10 == 0 || i + 1 == epochs) {
                 std::cout << "Epoch " << i + 1 << " of " << epochs << ": Loss = " << loss.item<double>() << '\n';
             }
         }
         return loss_history;
     }
 
-    std::size_t graph_size;
-    std::size_t max_signals;
-    std::size_t signal_life;
-    std::size_t signal_error_sd;
-    std::size_t n_other_features;
-    std::size_t n_features;
+    long int graph_size;
+    long int max_signals;
+    long int signal_life;
+    long int signal_error_sd;
+    long int n_other_features;
+    long int n_features;
     double connection_proba;
     double value_mean;
     double value_sd;
 
-    torch::nn::Linear first;
+    torch::nn::Linear first = nullptr;
     std::vector<torch::nn::Linear> hidden;
-    torch::nn::Linear last;
+    torch::nn::Linear last = nullptr;
 
+    std::mutex myMutex;
 };
 
 
 int main() {
-    // Matrix<bool> graph(
-    //     {
-    //         false, true, false,
-    //         true, false, true,
-    //         false, true, false
-    //     },
-    //     3
-    // );
-    auto graph = gen_random_graph(3, 0.5);
-    graph.print();
-
-    Network net(graph, 0.0, 1.0, 4, 0.1);
-    auto distances = net.get_distances();
-    distances.print();
-
-    net.print_signals();
-
-    MLModel model(3);
-    model.train();
+    MLModel model(10);
+    model.train(1000, 0.001, 100, 20);
 }

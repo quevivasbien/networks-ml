@@ -1,4 +1,6 @@
-*.ipynb
-*.csv
-.*
+*
+!*.py
+!*.cpp
+!*.h
+!*.txt
 !.gitignore

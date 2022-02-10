@@ -35,7 +35,7 @@ MLModel::MLModel(
     int max_signals,
     int n_hidden,
     int hidden_size
-) : graph_size(graph_size)
+) : graph_size(graph_size), max_signals(max_signals)
 {
     // input features are:
     // graph_size**2 features to describe the graph
@@ -82,7 +82,9 @@ torch::Tensor MLModel::get_features(const Network& net) {
         for (int j = 0; j < signals_set.size(); j++) {
             const auto& signals = signals_set[j];
             int start_idx = max_signals * (graph_size + 1) * j;
-            std::cout << "start_idx: " << start_idx << '\n';
+            // std::cout << "(reciever, source): (" << i << ", " << j << ")\n";
+            // std::cout << "start_idx: " << start_idx << '\n';
+            // std::cout << "max_signals: " << max_signals << '\n';
             // iterate through signal senders
             for (
                 int k = 0;
@@ -91,7 +93,6 @@ torch::Tensor MLModel::get_features(const Network& net) {
             ) {
                 const Signal& signal = signals[k];
                 int offset = start_idx + (graph_size + 1) * k;
-                std::cout << offset << ' ' << signal.sender << ' ' << i << ' ' << graph_size << '\n';
                 other_features.index({i, offset + signal.sender}) = 1.0;
                 other_features.index({i, offset + graph_size}) = signal.value;
             }

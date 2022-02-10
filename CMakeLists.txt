@@ -4,6 +4,10 @@ project(networks_ml)
 find_package(Torch REQUIRED)
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${TORCH_CXX_FLAGS}")
 
-add_executable(networks_ml networks_ml.cpp)
-target_link_libraries(networks_ml "${TORCH_LIBRARIES}")
-set_property(TARGET networks_ml PROPERTY CXX_STANDARD 17)
+add_library(lib networks.h networks.cpp ml.h ml.cpp)
+target_link_libraries(lib "${TORCH_LIBRARIES}")
+
+add_executable(main main.cpp)
+target_link_libraries(main lib)
+
+set_property(TARGET lib PROPERTY CXX_STANDARD 17)

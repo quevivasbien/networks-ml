@@ -73,7 +73,7 @@ struct MLModel : torch::nn::Module {
     int graph_size;
     int max_signals;
     int signal_life = 5;
-    int signal_error_sd = 0.1;
+    double signal_error_sd = 0.1;
     int n_other_features;
     int n_features;
     double connection_proba = 0.5;

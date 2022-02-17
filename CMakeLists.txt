@@ -10,4 +10,7 @@ target_link_libraries(lib "${TORCH_LIBRARIES}")
 add_executable(main main.cpp)
 target_link_libraries(main lib)
 
+add_executable(two_player_test two_player_test.cpp)
+target_link_libraries(two_player_test lib)
+
 set_property(TARGET lib PROPERTY CXX_STANDARD 17)

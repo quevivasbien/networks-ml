@@ -13,4 +13,7 @@ target_link_libraries(main lib)
 add_executable(two_player_test two_player_test.cpp)
 target_link_libraries(two_player_test lib)
 
+add_executable(uncorrelated_bayesian_test uncorrelated_bayesian_test.cpp)
+target_link_libraries(uncorrelated_bayesian_test lib)
+
 set_property(TARGET lib PROPERTY CXX_STANDARD 17)

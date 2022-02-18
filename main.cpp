@@ -42,9 +42,9 @@ double parse_to_float(const std::string& s) {
 
 
 int main(int argc, char *argv[]) {
-    if (argc != 9+1) {
+    if (argc != 10+1) {
         std::cout << "Arguments are:\n"
-            << "[graph size (int)] [connection proba (float in [0,1])] "
+            << "[graph size (int)] [connection proba (float in [0,1])] [signal life (int)] "
             << "[max signals (int)] [n hidden layers (int)] [hidden layer size (int)] "
             << "[training epochs (int)] [learning rate (float)] [epoch size (int)] "
             << "[eval size (int)]\n";
@@ -53,16 +53,18 @@ int main(int argc, char *argv[]) {
 
     int graph_size = parse_to_int(argv[1]);
     double connection_proba = parse_to_float(argv[2]);
-    int max_signals = parse_to_int(argv[3]);
-    int n_hidden = parse_to_int(argv[4]);
-    int hidden_size = parse_to_int(argv[5]);
-    int epochs = parse_to_int(argv[6]);
-    double lr = parse_to_float(argv[7]);
-    int epoch_size = parse_to_int(argv[8]);
-    int eval_size = parse_to_int(argv[9]);
+    int signal_life = parse_to_int(argv[3]);
+    int max_signals = parse_to_int(argv[4]);
+    int n_hidden = parse_to_int(argv[5]);
+    int hidden_size = parse_to_int(argv[6]);
+    int epochs = parse_to_int(argv[7]);
+    double lr = parse_to_float(argv[8]);
+    int epoch_size = parse_to_int(argv[9]);
+    int eval_size = parse_to_int(argv[10]);
 
     MLModel model(graph_size, max_signals, n_hidden, hidden_size);
     model.connection_proba = connection_proba;
+    model.signal_life = signal_life;
     
     model.train(epochs, lr, epoch_size);
     model.eval(eval_size, "data.csv");

@@ -1,6 +1,5 @@
-*
-!*.py
-!*.cpp
-!*.h
-!*.txt
-!.gitignore
+*.csv
+*.ipynb
+*.vscode
+*bin
+*build

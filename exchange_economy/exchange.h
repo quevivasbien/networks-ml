@@ -1,27 +1,21 @@
 #pragma once
 
+#include <torch/torch.h>
 #include <vector>
 #include <cassert>
 #include <memory>
-// #include <utility>
 
 
 class UtilFunc {
     // A simple cobb-douglas utility function
 public:
-    UtilFunc(std::vector<double> params);
-    double eval(std::vector<double> goods);
+    UtilFunc(torch::Tensor params);
+    double eval(const torch::Tensor& goods) const;
     int get_n_goods() const;
+    const torch::Tensor& get_params() const;
 private:
-    std::vector<double> params;
+    torch::Tensor params;
     int n_goods;
-};
-
-
-struct Offer {
-    Offer(std::vector<double> give, std::vector<double> get) : give(give), get(get) {}
-    const std::vector<double> give;
-    const std::vector<double> get;
 };
 
 
@@ -30,8 +24,17 @@ class Person;  // forward declaration
 class DecisionHelper {
     // Person uses this to decide offers to make/accept
 public:
-    virtual bool accept(const Person& person, const Offer& offer) const = 0;
-    virtual Offer make_offer(const Person& proposer, const Person& other) const = 0;
+    virtual bool accept(
+        const Person& person,
+        const Person& proposer,
+        const torch::Tensor& offer,
+        const torch::Tensor& total_endowment
+    ) const = 0;
+    virtual torch::Tensor& make_offer(
+        const Person& proposer,
+        const Person& other,
+        const torch::Tensor& total_endowment
+    ) const = 0;
 };
 
 
@@ -42,14 +45,15 @@ class Person {
     friend ExchangeEconomy;
 public:
     Person(
-        std::vector<double> endowment,
+        torch::Tensor endowment,
         UtilFunc u,
         std::shared_ptr<DecisionHelper> helper
     );
     int get_n_goods() const;
-    const std::vector<double>& get_goods() const;
+    const torch::Tensor& get_goods() const;
+    const torch::Tensor& get_my_util_params() const;
 private:
-    std::vector<double> goods;
+    torch::Tensor goods;
     UtilFunc u;
     int n_goods;
     std::shared_ptr<DecisionHelper> helper;
@@ -66,4 +70,5 @@ private:
     std::vector<Person> persons;
     int n_persons;
     int n_goods;
+    torch::Tensor total_endowment;
 };

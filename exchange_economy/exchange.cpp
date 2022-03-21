@@ -1,4 +1,5 @@
 #include <cmath>
+#include <utility>
 #include "exchange.h"
 
 // void vector_add(
@@ -65,6 +66,10 @@ const torch::Tensor& Person::get_my_util_params() const {
     return u.get_params();
 }
 
+const double Person::get_consumption_util() const {
+    return u.eval(goods);
+}
+
 
 ExchangeEconomy::ExchangeEconomy(std::vector<Person> persons) : persons(persons), n_persons(persons.size()) {
     assert(n_persons > 0);
@@ -80,17 +85,32 @@ ExchangeEconomy::ExchangeEconomy(std::vector<Person> persons) : persons(persons)
     }
 }
 
-void ExchangeEconomy::time_step() {
+std::tuple<torch::Tensor, torch::Tensor> ExchangeEconomy::time_step() {
+    auto log_proba = torch::tensor(0.0, torch::requires_grad(true));
+    auto value_guess = torch::tensor(0.0, torch::requires_grad(true));
     for (int i = 0; i < n_persons; i++) {
+        value_guess = value_guess + persons[i].helper->get_value(persons[i], total_endowment, time);
         for (int j = 0; j < n_persons; j++) {
             if (i == j) {
                 continue;
             }
-            torch::Tensor proposal = persons[i].helper->make_offer(persons[i], persons[j], total_endowment);
-            if (persons[j].helper->accept(persons[j], persons[i], proposal, total_endowment)) {
-                persons[i].goods += proposal;
-                persons[j].goods -= proposal;
+            auto [proposal, proposal_log_proba] = persons[i].helper->make_offer(
+                persons[i], persons[j], total_endowment, time
+            );
+            auto [accept, accept_log_proba] = persons[j].helper->accept(
+                persons[j], persons[i], proposal, total_endowment, time
+            );
+            if (accept) {
+                persons[i].goods = persons[i].goods + proposal;
+                persons[j].goods = persons[j].goods - proposal;
             }
+            log_proba = log_proba + proposal_log_proba + accept_log_proba;
         }
     }
+    time++;
+    return {log_proba, value_guess};
+}
+
+const std::vector<Person>& ExchangeEconomy::get_persons() const {
+    return persons;
 }

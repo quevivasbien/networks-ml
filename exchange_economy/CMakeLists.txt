@@ -8,3 +8,4 @@ add_executable(exchange main.cpp)
 target_link_libraries(exchange exchange_lib)
 
 set_property(TARGET exchange_lib PROPERTY CXX_STANDARD 17)
+set_property(TARGET exchange PROPERTY CXX_STANDARD 17)

@@ -14,3 +14,4 @@ add_executable(uncorrelated_bayesian_test uncorrelated_bayesian_test.cpp)
 target_link_libraries(uncorrelated_bayesian_test signals_lib)
 
 set_property(TARGET signals_lib PROPERTY CXX_STANDARD 17)
+set_property(TARGET signals PROPERTY CXX_STANDARD 17)

@@ -92,6 +92,12 @@ private:
 };
 
 
+ExchangeEconomy setup_economy(
+    const UtilFunc& utilFunc,
+    std::shared_ptr<MLHelper> helper,
+    const torch::Tensor& endowments
+);
+
 void train(
     const torch::Tensor& util_params,
     std::shared_ptr<MLHelper> helper,

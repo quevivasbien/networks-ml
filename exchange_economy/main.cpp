@@ -14,9 +14,9 @@ int main() {
         2,  // n_persons
         1.0,  // goods_mean
         0.1,  // goods_sd
-        1,  // epochs
-        2,  // steps_per_epoch
-        0.01  // lr
+        1000,  // epochs
+        4,  // steps_per_epoch
+        0.0001  // lr
     );
 
     return 0;

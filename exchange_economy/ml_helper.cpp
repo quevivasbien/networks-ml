@@ -1,5 +1,6 @@
 #include <string>
 #include <utility>
+#include <cmath>
 #include "ml_helper.h"
 
 #define _USE_MATH_DEFINES
@@ -19,9 +20,13 @@ void xavier_init(torch::nn::Module& module) {
 std::tuple<torch::Tensor, torch::Tensor> sample_normal(
     const torch::Tensor& params
 ) {
+    // note: only for sampling a SINGLE draw
     assert(params.dim() == 2 && params.size(0) == 2);
     auto mu = params[0];
-    auto sigma = torch::exp(params[1]);
+    // std dev is constrained to <= 1
+    auto sigma = torch::min(
+        torch::ones_like(params[1]), torch::exp(params[1])
+    );
     auto normal_vals = torch::randn(params.size(1)) * sigma + mu;
     auto log_proba = torch::sum(-0.5 * torch::pow((normal_vals - mu) / sigma, 2) - torch::log(sigma * SQRT2PI));
     return {normal_vals, log_proba};
@@ -207,7 +212,7 @@ std::tuple<bool, torch::Tensor> MLHelper::accept(
         }
     );
     // plug into AcceptingNet
-    auto acceptance_proba = acceptingNet->forward(features).view({1});
+    auto acceptance_proba = acceptingNet->forward(features)[0];
     bool accept = (torch::rand(1) < acceptance_proba).item<bool>();
     auto log_proba = torch::log(
         (accept) ? acceptance_proba : 1 - acceptance_proba
@@ -249,7 +254,7 @@ torch::Tensor MLHelper::get_value(
             torch::tensor({time})
         }
     );
-    return valueNet->forward(features);
+    return valueNet->forward(features)[0];
 }
 
 
@@ -259,6 +264,30 @@ int MLHelper::get_n_goods() const {
 
 std::vector<torch::optim::OptimizerParamGroup> MLHelper::get_params() const {
     return {proposingNet->parameters(), acceptingNet->parameters()};
+}
+
+
+ExchangeEconomy setup_economy(
+    const UtilFunc& utilFunc,
+    std::shared_ptr<MLHelper> helper,
+    const torch::Tensor& endowments
+) {
+    // clone endowments memory so we can modify goods tensor later while remembering what endowments were for next epoch
+    auto goods = endowments.clone();
+    int n_persons = goods.size(0);
+    std::vector<Person> persons;
+    persons.reserve(n_persons);
+    for (int i = 0; i < n_persons; i++) {
+        persons.push_back(
+            Person(
+                goods[i],
+                utilFunc,
+                helper
+            )
+        );
+    }
+
+    return ExchangeEconomy(persons);
 }
 
 
@@ -277,33 +306,26 @@ void train(
     int n_goods = helper->get_n_goods();
     assert(util_params.size(0) == n_goods);
 
+    // everyone has same util func and helper, but different endowments
     UtilFunc utilFunc(util_params);
     // endowments are normal distributed
-    auto goods = goods_mean + torch::randn({n_persons, n_goods}) * goods_sd;
-    // everyone has same util func and helper, but different endowments
-    std::vector<Person> persons;
-    persons.reserve(n_persons);
-    for (int i = 0; i < n_persons; i++) {
-        persons.push_back(
-            Person(
-                goods[i],
-                utilFunc,
-                helper
-            )
-        );
-    }
-
-    ExchangeEconomy economy(persons);
+    auto endowments = goods_mean + torch::randn({n_persons, n_goods}) * goods_sd;
+    
 
     auto optim = torch::optim::Adam(helper->get_params(), lr);
 
     for (int i = 0; i < epochs; i++) {
         optim.zero_grad();
 
-        auto log_probas = torch::empty(steps_per_epoch, torch::requires_grad(true));
-        auto value_guesses = torch::empty(steps_per_epoch, torch::requires_grad(true));
+        // set up a new (identical) economy with each epoch
+        auto economy = setup_economy(utilFunc, helper, endowments);
+    
+        auto log_probas = torch::empty(steps_per_epoch);
+        auto value_guesses = torch::empty(steps_per_epoch);
         for (int t = 0; t < steps_per_epoch; t++) {
             auto [log_proba, value_guess] = economy.time_step();
+            log_probas[t] = log_proba;
+            value_guesses[t] = value_guess;
         }
 
         // calculate actual value at end of trading
@@ -313,14 +335,29 @@ void train(
         }
         // translate to advantage and then to loss score
         // no reward until end of trading makes this calculation easy
-        std::cout << "Vguess " << value_guesses << '\n';
         auto advantages = value_guesses - value;
-        std::cout << "Adv " << advantages << '\n';
         auto loss = torch::sum(torch::pow(advantages, 2)) + torch::sum(log_probas * advantages);
-        std::cout << "Loss " << loss << '\n';
 
-        loss.backward();
-        optim.step();
+        double loss_item = loss.item<double>();
+        if (!std::isnan(loss_item)) {
+            // don't step when loss is nan
+            loss.backward();
+            optim.step();
+        }
+        else {
+            // try to figure out what went wrong
+            std::cout << "Vals: " << value_guesses.view({1, -1}) << '\n';
+            std::cout << "Adv: " << advantages.view({1, -1}) << '\n';
+            std::cout << "logP: " << log_probas.view({1, -1}) << '\n';
+            std::cout << "Goods:\n";
+            for (const auto& person : economy.get_persons()) {
+                std::cout << person.get_goods().view({1, -1}) << '\n';
+            }
+        }
+
+        std::cout << "Epoch " << i + 1 << ": Loss = " << loss_item << '\n';
     }
     
 }
+
+// TODO: Implement parallel training

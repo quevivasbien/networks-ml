@@ -2,28 +2,6 @@
 #include <utility>
 #include "exchange.h"
 
-// void vector_add(
-//     torch::Tensor& a,
-//     const torch::Tensor& b
-// ) {
-//     // adds b to a, (a in place)
-//     assert(a.size() == b.size());
-//     for (int i = 0; i < a.size(); i++) {
-//         a[i] += b[i];
-//     }
-// }
-
-// void vector_subtract(
-//     torch::Tensor& a,
-//     const torch::Tensor& b
-// ) {
-//     // subtracts b from a, (a in place)
-//     assert(a.size() == b.size());
-//     for (int i = 0; i < a.size(); i++) {
-//         a[i] -= b[i];
-//     }
-// }
-
 
 UtilFunc::UtilFunc(torch::Tensor params) : params(params), n_goods(params.size(0)) {
     assert(params.dim() == 1);
@@ -89,7 +67,13 @@ std::tuple<torch::Tensor, torch::Tensor> ExchangeEconomy::time_step() {
     auto log_proba = torch::tensor(0.0, torch::requires_grad(true));
     auto value_guess = torch::tensor(0.0, torch::requires_grad(true));
     for (int i = 0; i < n_persons; i++) {
-        value_guess = value_guess + persons[i].helper->get_value(persons[i], total_endowment, time);
+        // guess the value of this state
+        value_guess = value_guess + persons[i].helper->get_value(
+            persons[i],
+            total_endowment,
+            time
+        );
+        // propose trades with all other players
         for (int j = 0; j < n_persons; j++) {
             if (i == j) {
                 continue;
@@ -101,8 +85,14 @@ std::tuple<torch::Tensor, torch::Tensor> ExchangeEconomy::time_step() {
                 persons[j], persons[i], proposal, total_endowment, time
             );
             if (accept) {
-                persons[i].goods = persons[i].goods + proposal;
-                persons[j].goods = persons[j].goods - proposal;
+                // cut off all quantities at the max value that each person can afford
+                auto to_trade = torch::min(
+                    persons[j].goods,
+                    -torch::min(persons[i].goods, -proposal)
+                );
+                // now make exchange
+                persons[i].goods = persons[i].goods + to_trade;
+                persons[j].goods = persons[j].goods - to_trade;
             }
             log_proba = log_proba + proposal_log_proba + accept_log_proba;
         }

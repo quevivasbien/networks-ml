@@ -2,6 +2,7 @@
 
 #include <torch/torch.h>
 #include <vector>
+#include <mutex>
 #include "exchange.h"
 
 
@@ -98,14 +99,36 @@ ExchangeEconomy setup_economy(
     const torch::Tensor& endowments
 );
 
-void train(
-    const torch::Tensor& util_params,
-    std::shared_ptr<MLHelper> helper,
-    int n_persons,
-    double goods_mean,
-    double goods_sd,
-    int epochs,
-    int steps_per_epoch,
-    int threadcount,
-    double lr
-);
+
+class Scenario {
+public:
+    Scenario(
+        const torch::Tensor& util_params,
+        std::shared_ptr<MLHelper> helper,
+        int n_persons,
+        double goods_mean,
+        double goods_sd,
+        int steps_per_epoch
+    );
+
+    void train(
+        int epochs,
+        int threadcount,
+        double lr
+    );
+
+protected:
+    UtilFunc utilFunc;
+    std::shared_ptr<MLHelper> helper;
+    torch::Tensor endowments;
+    int n_persons;
+    int n_goods;
+    double goods_mean;
+    double goods_sd;
+    int steps_per_epoch;
+
+    std::mutex mutex;
+
+private:
+    void run_epoch_on_thread(int steps_per_epoch, torch::Tensor* loss);
+};

@@ -2,7 +2,6 @@
 #include <utility>
 #include <cmath>
 #include <thread>
-#include <mutex>
 #include "ml_helper.h"
 
 #define _USE_MATH_DEFINES
@@ -325,30 +324,66 @@ void run_epoch_on_thread(
     }
 }
 
-void train(
+
+Scenario::Scenario(
     const torch::Tensor& util_params,
     std::shared_ptr<MLHelper> helper,
     int n_persons,
     double goods_mean,
     double goods_sd,
-    int epochs,
-    int steps_per_epoch,
-    int threadcount,
-    double lr
-) {
+    int steps_per_epoch
+) : helper(helper),
+    n_persons(n_persons),
+    goods_mean(goods_mean),
+    goods_sd(goods_sd),
+    utilFunc(util_params),
+    steps_per_epoch(steps_per_epoch)
+{
     // util_params should be 1d tensor of length n_goods
     assert(util_params.dim() == 1);
     int n_goods = helper->get_n_goods();
     assert(util_params.size(0) == n_goods);
 
     // everyone has same util func and helper, but different endowments
-    UtilFunc utilFunc(util_params);
-    // endowments are normal distributed
-    auto endowments = goods_mean + torch::randn({n_persons, n_goods}) * goods_sd;
+    
+    // endowments are normally distributed
+    endowments = goods_mean + torch::randn({n_persons, n_goods}) * goods_sd;
+}
 
+
+void Scenario::run_epoch_on_thread(int steps_per_epoch, torch::Tensor* loss) {
+    // set up a new (identical) economy with each epoch
+    auto economy = setup_economy(utilFunc, helper, endowments);
+
+    auto log_probas = torch::empty(steps_per_epoch);
+    auto value_guesses = torch::empty(steps_per_epoch);
+    for (int t = 0; t < steps_per_epoch; t++) {
+        auto [log_proba, value_guess] = economy.time_step();
+        log_probas[t] = log_proba;
+        value_guesses[t] = value_guess;
+    }
+
+    // calculate actual value at end of trading
+    double value = 0.0;
+    for (const auto& person : economy.get_persons()) {
+        value += person.get_consumption_util();
+    }
+    // translate to advantage and then to loss score
+    // no reward until end of trading makes this calculation easy
+    auto advantages = value_guesses - value;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        *loss += torch::sum((log_probas + advantages) * advantages);
+    }
+}
+
+
+void Scenario::train(
+    int epochs,
+    int threadcount,
+    double lr
+) {
     auto optim = torch::optim::Adam(helper->get_params(), lr);
-
-    std::mutex training_mutex;
 
     for (int i = 0; i < epochs; i++) {
         optim.zero_grad();
@@ -360,13 +395,10 @@ void train(
         for (int i = 0; i < threadcount; i++) {
             threads.push_back(
                 std::thread(
-                    run_epoch_on_thread,
-                    std::ref(util_params),
-                    std::ref(helper),
-                    std::ref(endowments),
+                    &Scenario::run_epoch_on_thread,
+                    this,
                     steps_per_epoch,
-                    &loss,
-                    std::ref(training_mutex)
+                    &loss
                 )
             );
         }
@@ -377,7 +409,8 @@ void train(
         loss.backward();
         optim.step();
 
+        double loss_score = loss.item<double>() / static_cast<double>(threadcount * n_persons);
+
         std::cout << "Epoch " << i + 1 << ": Loss = " << loss.item<double>() << '\n';
     }
-    
 }

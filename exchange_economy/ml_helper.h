@@ -106,5 +106,6 @@ void train(
     double goods_sd,
     int epochs,
     int steps_per_epoch,
+    int threadcount,
     double lr
 );

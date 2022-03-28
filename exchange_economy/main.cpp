@@ -1,5 +1,6 @@
 #include <torch/torch.h>
 #include <iostream>
+#include <memory>
 #include "ml_helper.h"
 #include "exchange.h"
 
@@ -14,9 +15,10 @@ int main() {
         2,  // n_persons
         1.0,  // goods_mean
         0.1,  // goods_sd
-        1000,  // epochs
+        100,  // epochs
         4,  // steps_per_epoch
-        0.0001  // lr
+        4,  // threadcount
+        0.001  // lr
     );
 
     return 0;
